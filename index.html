@@ -332,7 +332,7 @@ async function renderHome(main){
 
 /* ===== 検索(実データ) ===== */
 const PAGE_SIZE = 30;
-let currentTerm = "", currentPage = 0, requestToken = 0, qr = null, searchTimer = null;
+let currentPage = 0, requestToken = 0, qr = null, searchTimer = null;
 
 const KANA_FULL = [..."ァアィイゥウェエォオカガキギクグケゲコゴサザシジスズセゼソゾタダチヂッツヅテデトドナニヌネノハバパヒビピフブプヘベペホボポマミムメモャヤュユョヨラリルレロヮワヲンヴー"];
 const KANA_HALF = "ｧ ｱ ｨ ｲ ｩ ｳ ｪ ｴ ｫ ｵ ｶ ｶﾞ ｷ ｷﾞ ｸ ｸﾞ ｹ ｹﾞ ｺ ｺﾞ ｻ ｻﾞ ｼ ｼﾞ ｽ ｽﾞ ｾ ｾﾞ ｿ ｿﾞ ﾀ ﾀﾞ ﾁ ﾁﾞ ｯ ﾂ ﾂﾞ ﾃ ﾃﾞ ﾄ ﾄﾞ ﾅ ﾆ ﾇ ﾈ ﾉ ﾊ ﾊﾞ ﾊﾟ ﾋ ﾋﾞ ﾋﾟ ﾌ ﾌﾞ ﾌﾟ ﾍ ﾍﾞ ﾍﾟ ﾎ ﾎﾞ ﾎﾟ ﾏ ﾐ ﾑ ﾒ ﾓ ｬ ﾔ ｭ ﾕ ｮ ﾖ ﾗ ﾘ ﾙ ﾚ ﾛ ﾜ ﾜ ｦ ﾝ ｳﾞ ｰ".split(" ");
@@ -349,6 +349,11 @@ function wordFilter(word){
   variants.forEach(v => { conds.push(`part_name.ilike.*${v}*`); conds.push(`model_number.ilike.*${v}*`); });
   if(/^\d+$/.test(base)) conds.push(`part_id.eq.${base}`);
   return conds.join(",");
+}
+function colFilter(col, word){
+  const base = sanitize(toAscii(word));
+  const variants = [...new Set([base, toHalfKana(base)])].filter(Boolean);
+  return variants.map(v => `${col}.ilike.*${v}*`).join(",");
 }
 function classify(k){
   if(!k) return "other";
@@ -381,13 +386,27 @@ function cardHtml(r){
     </div>`;
 }
 
-async function search(term, page){
+function searchForm(){
+  return {
+    id: toAscii(document.getElementById("qId").value).trim(),
+    name: document.getElementById("qName").value.trim(),
+    model: document.getElementById("qModel").value.trim()
+  };
+}
+
+async function search(page){
   const token = ++requestToken;
   const listEl = document.getElementById("list");
   const countEl = document.getElementById("count");
   const moreBtn = document.getElementById("moreBtn");
   if(!listEl) return;
+  const f = searchForm();
   if(page === 0){ listEl.innerHTML = '<p class="status">検索中…</p>'; moreBtn.style.display = "none"; }
+
+  if(f.id && !/^\d+$/.test(f.id)){
+    listEl.innerHTML = '<p class="status">IDは数字で入力してください</p>';
+    countEl.textContent = ""; return;
+  }
 
   let q = supabaseClient.from("parts").select(`
       part_id, part_name, model_number, order_point, order_quantity,
@@ -397,7 +416,9 @@ async function search(term, page){
       storage_location:storage_locations ( storage_location_name )
     `, { count: "exact" }).not("part_name", "is", null);
 
-  term.split(/\s+/).filter(Boolean).forEach(w => { const f = wordFilter(w); if(f) q = q.or(f); });
+  if(f.id) q = q.eq("part_id", Number(f.id));
+  f.name.split(/\s+/).filter(Boolean).forEach(w => { const c = colFilter("part_name", w); if(c) q = q.or(c); });
+  f.model.split(/\s+/).filter(Boolean).forEach(w => { const c = colFilter("model_number", w); if(c) q = q.or(c); });
 
   const from = page * PAGE_SIZE;
   const { data, error, count } = await q.order("part_id").range(from, from + PAGE_SIZE - 1);
@@ -424,41 +445,53 @@ async function stopScan(){
 }
 
 function renderSearch(main){
-  currentTerm = ""; currentPage = 0;
+  currentPage = 0;
   main.innerHTML = `
     <h1>部品検索</h1>
     <div class="search-row">
-      <input id="q" type="text" placeholder="品名・型式・IDで検索(スペースで複数語)" autocomplete="off">
+      <input id="qId" type="text" inputmode="numeric" placeholder="ID" autocomplete="off" style="flex:0 0 100px;">
+      <input id="qName" type="text" placeholder="品名(スペースで複数語)" autocomplete="off">
+    </div>
+    <div class="search-row">
+      <input id="qModel" type="text" placeholder="型式(スペースで複数語)" autocomplete="off">
       <button class="scan-btn" id="scanBtn" title="QRコードを読み取る">▦</button>
+      <button class="btn" id="clearBtn">クリア</button>
     </div>
     <div id="scanner"><div id="reader"></div><button class="btn mini" style="margin-top:8px;" id="closeScan">閉じる</button></div>
     <p class="count" id="count"></p>
     <div id="list"></div>
     <button class="more" id="moreBtn" style="display:none">さらに表示</button>`;
 
-  document.getElementById("q").addEventListener("input", e => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => { currentTerm = e.target.value.trim(); search(currentTerm, 0); }, 300);
+  ["qId", "qName", "qModel"].forEach(id => {
+    document.getElementById(id).addEventListener("input", () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => search(0), 300);
+    });
   });
-  document.getElementById("moreBtn").addEventListener("click", () => search(currentTerm, currentPage + 1));
+  document.getElementById("clearBtn").addEventListener("click", () => {
+    ["qId", "qName", "qModel"].forEach(id => { document.getElementById(id).value = ""; });
+    search(0);
+  });
+  document.getElementById("moreBtn").addEventListener("click", () => search(currentPage + 1));
   document.getElementById("closeScan").addEventListener("click", stopScan);
   document.getElementById("scanBtn").addEventListener("click", async () => {
     document.getElementById("scanner").style.display = "block";
     try{
       qr = new Html5Qrcode("reader");
       await qr.start({ facingMode: "environment" }, { fps: 10, qrbox: 220 }, text => {
-        const input = document.getElementById("q");
-        input.value = text.trim();
+        const t = text.trim();
+        const m = toAscii(t).match(/\d+/);
+        ["qId", "qName", "qModel"].forEach(id => { document.getElementById(id).value = ""; });
+        document.getElementById("qId").value = m ? m[0] : t;
         stopScan();
-        currentTerm = input.value;
-        search(currentTerm, 0);
+        search(0);
       });
     }catch(err){
       document.getElementById("scanner").style.display = "none";
       alert("カメラを起動できませんでした。\n(カメラは https のページでのみ使えます)\n" + err);
     }
   });
-  search("", 0);
+  search(0);
 }
 
 /* ===== 入出庫 ===== */
